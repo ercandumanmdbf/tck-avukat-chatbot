@@ -6,4 +6,6 @@ The work and visuals belong to me and there is no restriction on the codes.
 
 It is free to use for educational purposes without notice.
 
+P.s Your development help is accepted with a warm heart.
+
 Ercan
