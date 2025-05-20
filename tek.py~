@@ -1,0 +1,209 @@
+import pygame
+import textwrap
+import threading
+import sys
+import time
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from peft import PeftModel
+
+# --- Model Yükleme ---
+def load_model():
+    base_model = "meta-llama/Meta-Llama-3-8B-Instruct"
+    adapter_model = "ercanduman/tck_trained_Llama3.1"  # Kendi HF LoRA model adın
+
+    tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model,
+        device_map="auto",
+        trust_remote_code=True
+    )
+
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model,
+        quantization_config=bnb_config,
+        device_map="auto",
+        trust_remote_code=True
+    )
+
+    model = PeftModel.from_pretrained(base, adapter_model)
+    model.eval()
+
+    return model, tokenizer
+
+model, tokenizer = load_model()
+
+# --- Selam ve TCK Kontrolleri ---
+def is_greeting(message: str) -> bool:
+    greetings = ["selam", "merhaba", "hi", "günaydın", "iyi akşamlar", "iyi geceler", "nasılsın"]
+    return any(greet in message.lower() for greet in greetings)
+
+# --- Pygame Ayarlar ---
+pygame.init()
+screen = pygame.display.set_mode((800, 600))
+pygame.display.set_caption("TCK Avukat Chatbot")
+font = pygame.font.SysFont(None, 24)
+big_font = pygame.font.SysFont(None, 36)
+clock = pygame.time.Clock()
+
+# --- Görsel ---
+lawyer_img = pygame.image.load("lawyer.png")
+lawyer_img = pygame.transform.scale(lawyer_img, (120, 150))
+
+# --- Mesajlar ---
+messages, input_text = [], ""
+chat_started = False
+cursor_visible = True
+cursor_counter, scroll_y, line_height = 0, 0, 25
+bot_thinking = closing = False
+auto_scroll = True
+scroll_dragging = False
+scrollbar_rect = pygame.Rect(780, 25, 8, 480)
+mouse_y_offset = scrollbar_click_offset = 0
+running, pending_input = True, None
+
+# --- Bot Yanıtı ---
+def get_bot_response(user_input):
+    global bot_thinking, closing, auto_scroll
+    bot_thinking = True
+
+    if "teşekk" in user_input.lower() or "tşk" in user_input.lower():
+        messages.append(("Bot Avukat", "Rica ederim. Görüşme 5 saniye içinde kapanacak."))
+        closing = True
+        bot_thinking = False
+        auto_scroll = True
+        return ""
+
+    if is_greeting(user_input):
+        bot_thinking = False
+        return "Selam! Ceza hukuku ile ilgili bir sorunuz varsa, dinliyorum."
+
+    try:
+        context = "\n".join([f"{s}: {m}" for s, m in messages[-10:] if s != "Siz"] + [f"Kullanıcı: {user_input}"])
+        inputs = tokenizer.encode(context, return_tensors="pt", truncation=True, max_length=2048)
+        if torch.cuda.is_available():
+            inputs = inputs.to("cuda")
+
+        outputs = model.generate(
+            inputs,
+            max_new_tokens=200,
+            do_sample=True,
+            temperature=0.7,
+            pad_token_id=tokenizer.eos_token_id
+        )
+        response = tokenizer.decode(outputs[0], skip_special_tokens=True).split("Bot Avukat:")[-1].strip()
+        bot_thinking = False
+        auto_scroll = True
+        return response
+    except Exception as e:
+        bot_thinking = False
+        return f"Yanıt oluşturulurken hata: {str(e)}"
+
+# --- Ana Döngü ---
+while running:
+    screen.fill((240, 240, 240))
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        elif event.type == pygame.KEYDOWN:
+            if chat_started:
+                if event.key == pygame.K_RETURN and input_text.strip():
+                    messages.append(("Siz", input_text))
+                    pending_input, input_text = input_text, ""
+                elif event.key == pygame.K_BACKSPACE:
+                    input_text = input_text[:-1]
+                elif event.key == pygame.K_UP:
+                    scroll_y += line_height; auto_scroll = False
+                elif event.key == pygame.K_DOWN:
+                    scroll_y -= line_height; auto_scroll = False
+                else:
+                    input_text += event.unicode
+            elif event.key == pygame.K_RETURN:
+                chat_started = True
+                messages.append(("Sistem", "Görüşme başladı. Sorunuzu yazabilirsiniz."))
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            if event.button == 4: scroll_y += line_height; auto_scroll = False
+            elif event.button == 5: scroll_y -= line_height; auto_scroll = False
+            elif event.button == 1 and scrollbar_rect.collidepoint(event.pos):
+                scroll_dragging = True
+                scrollbar_click_offset = event.pos[1] - scrollbar_rect.y
+                auto_scroll = False
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            scroll_dragging = False
+        elif event.type == pygame.MOUSEMOTION and scroll_dragging:
+            max_scroll = max(len(messages) * line_height * 2 - 480, 1)
+            scrollbar_height = max(40, 480 * 480 // max_scroll)
+            new_y = max(25, min(505 - scrollbar_height, event.pos[1] - scrollbar_click_offset))
+            scroll_ratio = (new_y - 25) / (480 - scrollbar_height)
+            scroll_y = -int(scroll_ratio * max_scroll)
+            auto_scroll = False
+
+    if pending_input:
+        def bot_response_thread():
+            reply = get_bot_response(pending_input)
+            if reply: messages.append(("Bot Avukat", reply))
+        threading.Thread(target=bot_response_thread).start()
+        pending_input = None
+
+    if closing:
+        pygame.display.flip()
+        pygame.time.wait(5000)
+        pygame.quit(); sys.exit()
+
+    if not chat_started:
+        screen.blit(lawyer_img, (340, 80))
+        screen.blit(big_font.render("TCK Avukat Chatbot", True, (0, 0, 0)), (270, 20))
+        screen.blit(font.render("Avukat bot ile görüşmeye başlamak için Enter'a basın.", True, (0, 0, 0)), (230, 300))
+    else:
+        screen.blit(lawyer_img, (20, 10))
+        if bot_thinking:
+            screen.blit(font.render("Düşünüyor...", True, (100, 100, 255)), (25, 170))
+
+        chat_rect = pygame.Rect(160, 20, 620, 500)
+        pygame.draw.rect(screen, (255, 255, 255), chat_rect)
+        pygame.draw.rect(screen, (0, 0, 0), chat_rect, 2)
+        clip_rect = pygame.Rect(165, 25, 610, 490)
+        screen.set_clip(clip_rect)
+
+        total_height, rendered_lines = 0, []
+        for sender, msg in messages:
+            for line in textwrap.wrap(msg, width=70):
+                rendered_lines.append((sender, line))
+                total_height += line_height
+
+        min_scroll = min(0, 480 - total_height)
+        scroll_y = min(max(scroll_y, min_scroll), 0) if not auto_scroll else min_scroll
+        y = 30 + scroll_y
+
+        for i, (sender, line) in enumerate(rendered_lines):
+            prefix = "" if i > 0 and rendered_lines[i-1][0] == sender else f"{sender}: "
+            color = (0, 0, 200) if sender == "Siz" else (200, 0, 0) if sender == "Bot Avukat" else (0, 0, 0)
+            screen.blit(font.render(f"{prefix}{line}", True, color), (170, y))
+            y += line_height
+
+        screen.set_clip(None)
+
+        if total_height > 480:
+            scrollbar_height = max(40, 480 * 480 // total_height)
+            scroll_pos = int((abs(scroll_y) / (total_height - 480)) * (480 - scrollbar_height))
+            scrollbar_rect = pygame.Rect(780, 25 + scroll_pos, 8, scrollbar_height)
+            pygame.draw.rect(screen, (200, 200, 200), (780, 25, 8, 480))
+            pygame.draw.rect(screen, (100, 100, 100), scrollbar_rect)
+
+        pygame.draw.rect(screen, (255, 255, 255), pygame.Rect(190, 550, 580, 30))
+        pygame.draw.rect(screen, (0, 0, 0), pygame.Rect(190, 550, 580, 30), 2)
+        screen.blit(font.render("Siz:", True, (0, 0, 0)), (150, 555))
+
+        cursor_counter += 1
+        if cursor_counter >= 30:
+            cursor_visible = not cursor_visible
+            cursor_counter = 0
+        display_text = input_text + ("|" if cursor_visible else "")
+        screen.blit(font.render(display_text, True, (0, 0, 0)), (200, 555))
+
+    pygame.display.flip()
+    clock.tick(30)
+
+pygame.quit()
